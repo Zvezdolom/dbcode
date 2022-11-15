@@ -15,6 +15,7 @@ class config:
         self.db_type: str = str(self.config['db']['type'])
         self.db_encode: str = str(self.config['db']['encode']).lower()
         self.db_param_id: str = str(self.config['db']['param_id'])
+        self.db_debug: bool = bool(self.config['db']['debug'])
         self.db_schema: dict = ast.literal_eval(str(self.config['db']['schema']))
 
         self.db_sql3_path: str = str(self.config['db_sql3']['path'])
@@ -39,6 +40,3 @@ class config:
     def del_table(self, table: str):
         del self.db_schema[table]
         self.update('db', 'schema', str(self.db_schema))
-
-
-cfg = config()
