@@ -1,42 +1,55 @@
-import os
 import psycopg2
 import sqlite3 as sql
 import psycopg2.extras
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from .utils import deprecated
-from .config import config
-
-
-cfg = config()
 
 
 class database:
-    def __init__(self, db_type: str = None, sql_init: bool = False) -> None:
+    def __init__(self, db_id: str = None, db_debug: bool = None, db_encode: str = None) -> None:
         """
         init function. \n
         :param db_type: database type (sqlite3 / postgresql).
         :param sql_init: SQL init file.
         """
-        self.db_type: str = cfg.db_type if db_type is None else db_type
-        self.db_id: str = cfg.db_param_id
-        self.db_debug: bool = cfg.db_debug
+        self.db_type = None
+        self.db_id: str = '_id' if db_id is None else db_id
+        self.db_debug: bool = False if db_debug is None else db_debug
+        self.db_encode = 'utf-8' if db_encode is None else db_encode
         self.db_params: dict = {}
-        if self.db_type == 'sqlite3':
-            self.connection = sql.connect(os.path.join(cfg.module_dir, f'{cfg.db_sql3_path}'))
-            self.connection.row_factory = sql.Row
-            self.cursor = self.connection.cursor()
-        elif self.db_type == 'postgresql':
-            host: str = cfg.db_psql_host
-            port: str = cfg.db_psql_port
-            user: str = cfg.db_psql_user
-            password: str = cfg.db_psql_password
-            dbname: str = cfg.db_psql_dbname
-            self.connection = psycopg2.connect(host=host, port=port, user=user, password=password, database=dbname)
-            self.connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-            self.cursor = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        else:
-            print('[error] (__init__) database_type does not match existing')
-        self.sql_file() if sql_init is True else None
+        self._connection = None
+        self._cursor = None
+
+    def __del__(self):
+        if self._connection:
+            self._connection.close()
+
+    def connect_sql3(self, path):
+        """
+        connect function, connect to sqlite3 database. \n
+        :param path: file path to sqlite3 database.
+        :return: None.
+        """
+        self.db_type = 'sqlite3'
+        self._connection = sql.connect(path)
+        self._connection.row_factory = sql.Row
+        self._cursor = self._connection.cursor()
+        self.load_schema()
+
+    def connect_psql(self, host, port, user, password, dbname):
+        """
+        connect function, connect to postgresql database. \n
+        :param host: postgresql database host (ip address).
+        :param port: postgresql database port.
+        :param user: postgresql database user.
+        :param password: postgresql database password.
+        :param dbname: postgresql database name (database).
+        :return: None.
+        """
+        self.db_type = 'postgresql'
+        self._connection = psycopg2.connect(host=host, port=port, user=user, password=password, database=dbname)
+        self._connection.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        self._cursor = self._connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         self.load_schema()
 
     def load_schema(self) -> None:
@@ -62,29 +75,30 @@ class database:
         try:
             request: str = f"{request}"
             print(f'[debug] (raw) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = self.cursor.fetchall()
+            self._cursor.execute(request)
+            result = self._cursor.fetchall()
             return None if not result else result
         except psycopg2.Error or sql.Error as e:
             print('[error] (raw) ' + str(e))
         return False
 
-    def sql_file(self, file_path=None):
+    def sql_file(self, file_path):
         """
         SQL files commands. \n
         :param file_path:
         :return:
         """
+        if file_path is None:
+            print('[error] (sql_init) sql_filepath is None')
+            return
         if self.db_type == 'sqlite3':
-            file_path: str = cfg.db_sql3_path if file_path is None else None
-            with open(os.path.join(cfg.module_dir, file_path), mode='r', encoding=cfg.db_encode) as file:
-                self.cursor.executescript(file.read())
-            self.connection.commit()
+            with open(file_path, mode='r', encoding=self.db_encode) as file:
+                self._cursor.executescript(file.read())
+            self._connection.commit()
         elif self.db_type == 'postgresql':
-            file_path: str = cfg.db_psql_init if file_path is None else None
-            with open(os.path.join(cfg.module_dir, file_path), mode='r', encoding=cfg.db_encode) as file:
-                self.cursor.execute(file.read())
-            self.connection.commit()
+            with open(file_path, mode='r', encoding=self.db_encode) as file:
+                self._cursor.execute(file.read())
+            self._connection.commit()
         else:
             print('[error] (sql_init) database_type does not match existing')
 
@@ -172,8 +186,8 @@ class database:
         try:
             request: str = f"SELECT {distinct} {field} FROM {table} {p_v} {order} {limit}"
             print(f'[debug] (select) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = self.cursor.fetchall()
+            self._cursor.execute(request)
+            result = self._cursor.fetchall()
             if not result:
                 return None
             if len(result) == 1 and cut is True:
@@ -185,14 +199,13 @@ class database:
             print('[error] (select) ' + str(e))
         return False
 
-    def select_join(self, table: str, tables: str or int or list, params: list, join_type: str = 'INNER',
-                    limit: int = None, order_fields: str or int or list = None, order_type: str = None,
-                    operator: str = 'AND'):
+    def select_join(self, table: str, tables: str or list, fields: list, join_type: str = 'INNER', limit: int = None,
+                    order_fields: str or int or list = None, order_type: str = None, operator: str = 'AND'):
         """
         SELECT (**READ**) with join param, request. \n
         :param table: table name.
         :param tables: tables name.
-        :param params: request parameters.
+        :param fields: request fields.
         :param join_type: join type (INNER, LEFT, RIGHT)
         :param limit: request limit.
         :param order_fields: request order fields.
@@ -200,9 +213,12 @@ class database:
         :param operator: logical operator.
         :return:
         """
-        tables: list = [tables] if isinstance(tables, int) or isinstance(tables, str) else tables
+        tables: list = [tables] if isinstance(tables, str) else tables
 
         join_type: str = join_type if join_type != 'INNER' else 'INNER'
+        if join_type != 'INNER' and join_type != 'LEFT' and self.db_type == 'sqlite3':
+            print(f'[error] (select_join) {join_type} are not currently supported')
+            return False
 
         operator: str = operator if operator == 'AND' else 'OR'
 
@@ -216,23 +232,20 @@ class database:
         inner_joins: str = ''
         for i in range(len(tables)):
             inner_joins += f'{join_type} JOIN {tables[i]}'
-            inner_joins += ' ON ' + f' {operator} '.join(j for j in [f'{table}.{k[0]} = {tables[i]}.{k[1]}' for k in params[i]])
+            inner_joins += ' ON ' + f' {operator} '.join(j for j in [f'{table}.{k[0]} = {tables[i]}.{k[1]}' for k in fields[i]])
             inner_joins += ' ' if i != len(tables)-1 else ''
 
         try:
             request: str = f"SELECT * FROM {table} {inner_joins} {order} {limit};"
-            print(f'[debug] (select) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = self.cursor.fetchall()
+            print(f'[debug] (select_join) request: {request}') if self.db_debug else None
+            self._cursor.execute(request)
+            result = self._cursor.fetchall()
             if not result:
                 return None
             return result
         except psycopg2.Error or sql.Error as e:
-            print('[error] (select) ' + str(e))
+            print('[error] (select_join) ' + str(e))
         return False
-
-    def select_union(self):
-        ...
 
     @deprecated
     def select_where(self, table: str, params: str or int or list, values: str or int or list,
@@ -281,8 +294,8 @@ class database:
         try:
             request: str = f"SELECT {distinct} {field} FROM {table} WHERE {p_v} {order} {limit}"
             print(f'[debug] (select_where) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = self.cursor.fetchall()
+            self._cursor.execute(request)
+            result = self._cursor.fetchall()
             if not result:
                 return None
             if len(result) == 1 and cut is True:
@@ -309,8 +322,8 @@ class database:
         try:
             request: str = f"SELECT DISTINCT {param} FROM {table} {limit}"
             print(f'[debug] (select_distinct) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = self.cursor.fetchall()
+            self._cursor.execute(request)
+            result = self._cursor.fetchall()
             if not result:
                 return None
             if len(result) == 1 and cut is True:
@@ -336,8 +349,8 @@ class database:
         try:
             request: str = f"SELECT count(*) as count FROM {table} {p_v}"
             print(f'[debug] (select_count) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = int(self.cursor.fetchone()['count'])
+            self._cursor.execute(request)
+            result = int(self._cursor.fetchone()['count'])
             if not result:
                 return None
             return result
@@ -362,8 +375,8 @@ class database:
         try:
             request: str = f"SELECT count(*) as count FROM {table} WHERE {p_v}"
             print(f'[debug] (select_count_where) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            result = int(self.cursor.fetchone()['count'])
+            self._cursor.execute(request)
+            result = int(self._cursor.fetchone()['count'])
             if not result:
                 return None
             return result
@@ -393,8 +406,8 @@ class database:
         try:
             request: str = f"UPDATE {table} SET {p_v_set} WHERE {p_v_where}"
             print(f'[debug] (update) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            self.connection.commit()
+            self._cursor.execute(request)
+            self._connection.commit()
             return True
         except psycopg2.Error or sql.Error as e:
             print('[error] (update) ' + str(e))
@@ -427,15 +440,15 @@ class database:
             if self.db_type == 'sqlite3':
                 request: str = f"INSERT INTO {table} ({param}) VALUES ('{value}')"
                 print(f'[debug] (insert) request: {request}') if self.db_debug else None
-                self.cursor.execute(request)
-                last_id: int = self.cursor.lastrowid
+                self._cursor.execute(request)
+                last_id: int = self._cursor.lastrowid
             elif self.db_type == 'postgresql':
                 request: str = f"INSERT INTO {table} ({param}) VALUES ('{value}') RETURNING {self.db_id}"
                 print(f'[debug] (insert) request: {request}') if self.db_debug else None
-                self.cursor.execute(request)
-                result = self.cursor.fetchone()[self.db_id]
+                self._cursor.execute(request)
+                result = self._cursor.fetchone()[self.db_id]
                 last_id: int = int(result)
-            self.connection.commit()
+            self._connection.commit()
             return last_id
         except psycopg2.Error or sql.Error as e:
             print('[error] (insert) ' + str(e))
@@ -457,8 +470,8 @@ class database:
         try:
             request: str = f"DELETE FROM {table} WHERE {p_v}"
             print(f'[debug] (delete) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            self.connection.commit()
+            self._cursor.execute(request)
+            self._connection.commit()
             return True
         except psycopg2.Error or sql.Error as e:
             print('[error] (delete) ' + str(e))
@@ -482,15 +495,15 @@ class database:
                 print('[error] (create_table) database_type does not match existing')
             request: str = f"CREATE TABLE IF NOT EXISTS {table} ({params});"
             print(f'[debug] (create_table) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
+            self._cursor.execute(request)
             if self.db_type == 'postgresql':
                 request: str = f"CREATE SEQUENCE IF NOT EXISTS {table}_seq INCREMENT 1 START 1 NO CYCLE OWNED BY {table}.{self.db_id};"
                 print(f'[debug] (create_table) request: {request}') if self.db_debug else None
-                self.cursor.execute(request)
+                self._cursor.execute(request)
                 request: str = f"ALTER TABLE {table} ALTER COLUMN {self.db_id} SET DEFAULT nextval('{table}_seq');"
                 print(f'[debug] (create_table) request: {request}') if self.db_debug else None
-                self.cursor.execute(request)
-            self.connection.commit()
+                self._cursor.execute(request)
+            self._connection.commit()
             return True
         except psycopg2.Error or sql.Error as e:
             print('[error] (create_table) ' + str(e))
@@ -505,8 +518,8 @@ class database:
         try:
             request: str = f"DROP TABLE {table}"
             print(f'[debug] (drop_table) request: {request}') if self.db_debug else None
-            self.cursor.execute(request)
-            self.connection.commit()
+            self._cursor.execute(request)
+            self._connection.commit()
             return True
         except psycopg2.Error or sql.Error as e:
             print('[error] (drop_table) ' + str(e))

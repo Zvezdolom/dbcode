@@ -1,2 +1,1 @@
-from .database import database
-from .config import config
+from dbcode.database import database
